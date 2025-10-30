@@ -6,6 +6,7 @@ from functools import partial as bind
 import elements
 import numpy as np
 from PIL import Image
+from scipy.ndimage import rotate
 
 from . import chunk as chunklib
 from . import limiters
@@ -78,6 +79,36 @@ class Replay:
         h, w = offsets_h[i], offsets_w[i]
         cropped_image[i] = padded_image[i, :, h:h+H, w:w+W, :]
     return cropped_image
+
+  def _augment_color_jitter(self, image):
+    # image shape is (B, L, H, W, C), dtype uint8
+    B, L, H, W, C = image.shape
+
+    # Convert to float 0.0-1.0 for calculations
+    image_float = image.astype(np.float32) / 255.0
+
+    # 1. Randomly change brightness
+    # We use a modest range (0.8x to 1.2x)
+    brightness_factor = np.random.uniform(0.8, 1.2, size=(B, L, 1, 1, 1))
+    image_float = image_float * brightness_factor
+
+    # 2. Randomly change contrast
+    contrast_factor = np.random.uniform(0.8, 1.2, size=(B, L, 1, 1, 1))
+    # Calculate mean over H, W, C (per image in batch and sequence)
+    mean_rgb = np.mean(image_float, axis=(2, 3, 4), keepdims=True)
+    image_float = (image_float - mean_rgb) * contrast_factor + mean_rgb
+
+    # 3. Randomly change saturation
+    saturation_factor = np.random.uniform(0.8, 1.2, size=(B, L, 1, 1, 1))
+    # Calculate grayscale (mean across C dimension)
+    grayscale = np.mean(image_float, axis=-1, keepdims=True)
+    image_float = (image_float * saturation_factor) + (grayscale * (1 - saturation_factor))
+
+    # Clip and convert back to uint8
+    image_float = np.clip(image_float, 0.0, 1.0)
+    image_final = (image_float * 255.0).astype(np.uint8)
+
+    return image_final
 
   def _augment_add_noise(self, image):
   # image shape is (B, L, H, W, C), dtype uint8
@@ -165,14 +196,14 @@ class Replay:
     data = self._assemble_batch(seqs, 0, self.length)
     data = self._annotate_batch(data, is_online, True)
 
-    # [--- THIS IS THE (CORRECTED) INJECTION ---]
+    # [--- THIS IS THE (FINAL) INJECTION ---]
     if mode == 'train' and self.config.use_aug and 'image' in data:
       
       # --- DEBUGGING BLOCK: START ---
       # We only run this code ONCE
       if self._aug_print_flag:
         try:
-          print("\n[AUGMENTATION VERIFIED]: Applying augmentations (Shift, Noise).")
+          print("\n[AUGMENTATION VERIFIED]: Applying FULL STACK (Shift, Jitter, Noise).")
           print("... Saving debug images to /tmp/ ...")
           
           # 1. Save the "before" image
@@ -180,14 +211,15 @@ class Replay:
           img_orig = Image.fromarray(original_image_data, 'RGB')
           img_orig.save('/tmp/01_original.png')
 
-          # 2. Run augmentations
+          # 2. Run augmentations IN ORDER
           img_shifted = self._augment_random_shift(data['image'])
-          img_noised = self._augment_add_noise(img_shifted)
+          img_jittered = self._augment_color_jitter(img_shifted)
+          img_noised = self._augment_add_noise(img_jittered)
           
           # 3. Save the "after" image
           augmented_image_data = img_noised[0, 0] # (H, W, C)
           img_aug = Image.fromarray(augmented_image_data, 'RGB')
-          img_aug.save('/tmp/02_augmented_shift_noise.png')
+          img_aug.save('/tmp/02_augmented_full_stack.png')
           
           print("... Debug images saved! Check /tmp/ on your server.\n")
           
@@ -198,6 +230,7 @@ class Replay:
             print(f"\n[AUGMENTATION DEBUG ERROR]: Could not save debug images. Error: {e}\n")
             # If debugging fails, just run the augmentations normally
             data['image'] = self._augment_random_shift(data['image'])
+            data['image'] = self._augment_color_jitter(data['image'])
             data['image'] = self._augment_add_noise(data['image'])
         
         self._aug_print_flag = False # Don't run this debug block again
@@ -207,6 +240,7 @@ class Replay:
       else:
         # After the first run, just do this (no saving)
         data['image'] = self._augment_random_shift(data['image'])
+        data['image'] = self._augment_color_jitter(data['image'])
         data['image'] = self._augment_add_noise(data['image'])
         
     # [--- END OF INJECTION ---]
