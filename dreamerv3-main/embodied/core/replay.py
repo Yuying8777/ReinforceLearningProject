@@ -15,7 +15,9 @@ class Replay:
 
   def __init__(
       self, length, capacity=None, directory=None, chunksize=1024,
-      online=False, selector=None, save_wait=False, name='unnamed', seed=0):
+      online=False, selector=None, save_wait=False, name='unnamed', seed=0, config=None):
+
+    self.config = config
 
     self.length = length
     self.capacity = capacity
@@ -51,6 +53,28 @@ class Replay:
     self.save_wait = save_wait
 
     self.metrics = {'samples': 0, 'inserts': 0, 'updates': 0}
+
+  def _augment_random_shift(self, image, padding=4):
+    # image shape is (B, L, H, W, C), dtype uint8
+    try:
+      B, L, H, W, C = image.shape
+    except ValueError:
+      print("Error in image shape. Expected 5 dims, got:", image.shape)
+      return image
+      
+    padded_image = np.pad(
+        image, 
+        ((0, 0), (0, 0), (padding, padding), (padding, padding), (0, 0)), 
+        mode='edge'
+    )
+    offsets_h = np.random.randint(0, 2 * padding + 1, size=(B,))
+    offsets_w = np.random.randint(0, 2 * padding + 1, size=(B,))
+    
+    cropped_image = np.empty_like(image)
+    for i in range(B):
+        h, w = offsets_h[i], offsets_w[i]
+        cropped_image[i] = padded_image[i, :, h:h+H, w:w+W, :]
+    return cropped_image
 
   def __len__(self):
     return len(self.items)
@@ -124,6 +148,12 @@ class Replay:
     seqs, is_online = zip(*[self._sample(mode) for _ in range(batch)])
     data = self._assemble_batch(seqs, 0, self.length)
     data = self._annotate_batch(data, is_online, True)
+
+    # [--- THIS IS THE INJECTION ---]
+    if mode == 'train' and self.config.use_aug and 'image' in data:
+      data['image'] = self._augment_random_shift(data['image'])
+    # [--- END OF INJECTION ---]
+
     return data
 
   @elements.timer.section('replay_update')

@@ -18,6 +18,7 @@ defaults:
   clock_port: ''
   ipv6: False
   errfile: False
+  use_aug: False
 
   logger:
     outputs: [jsonl, scope]
