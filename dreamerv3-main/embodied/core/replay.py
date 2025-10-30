@@ -21,7 +21,7 @@ class Replay:
 
     self.config = config
 
-    self._aug_print_flag = True
+    self._aug_print_flag = False
 
     self.length = length
     self.capacity = capacity
@@ -79,6 +79,32 @@ class Replay:
         h, w = offsets_h[i], offsets_w[i]
         cropped_image[i] = padded_image[i, :, h:h+H, w:w+W, :]
     return cropped_image
+
+  def _augment_rotate(self, image):
+    # image shape is (B, L, H, W, C), dtype uint8
+    B, L, H, W, C = image.shape
+    
+    # Flatten batch and time dims to (B*L, H, W, C)
+    images_flat = image.reshape(B * L, H, W, C)
+    rotated_flat = np.empty_like(images_flat)
+    
+    # Loop over each image in the flattened batch
+    for i in range(B * L):
+      # Pick a small random angle, e.g., +/- 5 degrees
+      angle = np.random.uniform(-5.0, 5.0) 
+      
+      # Apply rotation
+      # reshape=False keeps the image 64x64 (crops corners)
+      # mode='edge' fills in the new corners with the edge pixel
+      rotated_flat[i] = rotate(
+          images_flat[i], 
+          angle, 
+          reshape=False, 
+          mode='nearest'
+      )
+      
+    # Reshape back to original 5D
+    return rotated_flat.reshape(B, L, H, W, C)
 
   def _augment_color_jitter(self, image):
     # image shape is (B, L, H, W, C), dtype uint8
@@ -203,7 +229,7 @@ class Replay:
       # We only run this code ONCE
       if self._aug_print_flag:
         try:
-          print("\n[AUGMENTATION VERIFIED]: Applying FULL STACK (Shift, Jitter, Noise).")
+          print("\n[AUGMENTATION VERIFIED]: Applying FULL STACK (Shift, Rotate, Jitter, Noise).")
           print("... Saving debug images to /tmp/ ...")
           
           # 1. Save the "before" image
@@ -213,7 +239,8 @@ class Replay:
 
           # 2. Run augmentations IN ORDER
           img_shifted = self._augment_random_shift(data['image'])
-          img_jittered = self._augment_color_jitter(img_shifted)
+          img_rotated = self._augment_rotate(img_shifted)
+          img_jittered = self._augment_color_jitter(img_rotated)
           img_noised = self._augment_add_noise(img_jittered)
           
           # 3. Save the "after" image
@@ -230,6 +257,7 @@ class Replay:
             print(f"\n[AUGMENTATION DEBUG ERROR]: Could not save debug images. Error: {e}\n")
             # If debugging fails, just run the augmentations normally
             data['image'] = self._augment_random_shift(data['image'])
+            data['image'] = self._augment_rotate(data['image'])
             data['image'] = self._augment_color_jitter(data['image'])
             data['image'] = self._augment_add_noise(data['image'])
         
@@ -240,6 +268,7 @@ class Replay:
       else:
         # After the first run, just do this (no saving)
         data['image'] = self._augment_random_shift(data['image'])
+        data['image'] = self._augment_rotate(data['image'])
         data['image'] = self._augment_color_jitter(data['image'])
         data['image'] = self._augment_add_noise(data['image'])
         
