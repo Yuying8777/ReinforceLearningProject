@@ -5,6 +5,7 @@ from functools import partial as bind
 
 import elements
 import numpy as np
+from PIL import Image
 
 from . import chunk as chunklib
 from . import limiters
@@ -18,6 +19,8 @@ class Replay:
       online=False, selector=None, save_wait=False, name='unnamed', seed=0, config=None):
 
     self.config = config
+
+    self._aug_print_flag = True
 
     self.length = length
     self.capacity = capacity
@@ -75,6 +78,19 @@ class Replay:
         h, w = offsets_h[i], offsets_w[i]
         cropped_image[i] = padded_image[i, :, h:h+H, w:w+W, :]
     return cropped_image
+
+  def _augment_add_noise(self, image):
+  # image shape is (B, L, H, W, C), dtype uint8
+  # Add noise to the float3D version
+    image_float = image.astype(np.float32)
+
+  # Add small, zero-mean Gaussian noise
+    noise = np.random.normal(0.0, 1.0, image_float.shape)
+    image_float = image_float + noise
+
+  # Clip and convert back to uint8
+    image_final = np.clip(image_float, 0.0, 255.0).astype(np.uint8)
+    return image_final
 
   def __len__(self):
     return len(self.items)
@@ -149,9 +165,50 @@ class Replay:
     data = self._assemble_batch(seqs, 0, self.length)
     data = self._annotate_batch(data, is_online, True)
 
-    # [--- THIS IS THE INJECTION ---]
+    # [--- THIS IS THE (CORRECTED) INJECTION ---]
     if mode == 'train' and self.config.use_aug and 'image' in data:
-      data['image'] = self._augment_random_shift(data['image'])
+      
+      # --- DEBUGGING BLOCK: START ---
+      # We only run this code ONCE
+      if self._aug_print_flag:
+        try:
+          print("\n[AUGMENTATION VERIFIED]: Applying augmentations (Shift, Noise).")
+          print("... Saving debug images to /tmp/ ...")
+          
+          # 1. Save the "before" image
+          original_image_data = data['image'][0, 0] # (H, W, C)
+          img_orig = Image.fromarray(original_image_data, 'RGB')
+          img_orig.save('/tmp/01_original.png')
+
+          # 2. Run augmentations
+          img_shifted = self._augment_random_shift(data['image'])
+          img_noised = self._augment_add_noise(img_shifted)
+          
+          # 3. Save the "after" image
+          augmented_image_data = img_noised[0, 0] # (H, W, C)
+          img_aug = Image.fromarray(augmented_image_data, 'RGB')
+          img_aug.save('/tmp/02_augmented_shift_noise.png')
+          
+          print("... Debug images saved! Check /tmp/ on your server.\n")
+          
+          # 4. Pass the final augmented data to the agent
+          data['image'] = img_noised
+
+        except Exception as e:
+            print(f"\n[AUGMENTATION DEBUG ERROR]: Could not save debug images. Error: {e}\n")
+            # If debugging fails, just run the augmentations normally
+            data['image'] = self._augment_random_shift(data['image'])
+            data['image'] = self._augment_add_noise(data['image'])
+        
+        self._aug_print_flag = False # Don't run this debug block again
+      
+      # --- END DEBUGGING BLOCK ---
+      
+      else:
+        # After the first run, just do this (no saving)
+        data['image'] = self._augment_random_shift(data['image'])
+        data['image'] = self._augment_add_noise(data['image'])
+        
     # [--- END OF INJECTION ---]
 
     return data
